@@ -346,11 +346,21 @@ def setup_cluster(conn, input_nodes, compute_nodes, opts, deploy_ssh_key):
 EOF
 """, ncompute))
   ssh(master, opts, str.format("""cat >~/run-smpc <<EOF
-#!/bin/zsh
+#!/bin/zsh 
+export GOMAXPROCS=4
 $GOPATH/bin/input --config="/home/ubuntu/input-config.json"
 EOF
 """))
+  ssh(master, opts, str.format("""cat >~/test-smpc <<EOF
+#!/bin/zsh 
+export GOMAXPROCS=4
+parallel-ssh -h ~/hosts ~/run-smpc
+$GOPATH/bin/input --config="/home/ubuntu/input-config.json"
+parallel-ssh -h ~/hosts killall compute
+EOF
+"""))
   ssh(master, opts, "chmod 755 ~/run-smpc")
+  ssh(master, opts, "chmod 755 ~/test-smpc")
   print compute_nodes
   print map(lambda c: c.private_ip_address, compute_nodes)
   ssh(master, opts, str.format("""cat >~/hosts <<EOF
@@ -359,7 +369,7 @@ EOF
 """, '\n'.join(map(lambda c: c.private_ip_address, compute_nodes))))
   computes = ",\n".join(map(lambda c: str.format("\"tcp://{0}:5001\"", c.private_ip_address), compute_nodes))
   for i in xrange(0, len(compute_nodes)):
-      ssh(master, opts, str.format("ssh -o StrictHostKeyChecking=no ubuntu@{0} ls ~/", compute_nodes[i].private_ip_address))
+      ssh(master, opts, str.format("ssh -o StrictHostKeyChecking=no ubuntu@{0} go get -u github.com/apanda/smpc/...", compute_nodes[i].private_ip_address))
       ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/compute-config.json <<EOF
 {{
   "PubAddress": "tcp://{1}:4001",
@@ -372,6 +382,7 @@ EOF
 """, computes, str(master)))
       ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/run-smpc <<EOF
 #!/bin/zsh
+export GOMAXPROCS=4
 $GOPATH/bin/compute --config="/home/ubuntu/compute-config.json" --peer={0} > peer{0}.out &
 EOF
 """, i))
