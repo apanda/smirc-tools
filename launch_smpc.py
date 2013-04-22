@@ -45,8 +45,10 @@ def parse_args():
       add_help_option=False)
   parser.add_option("-h", "--help", action="help",
                     help="Show this help message and exit")
-  parser.add_option("-s", "--slaves", type="int", default=1,
+  parser.add_option("-s", "--slaves", type="int", default=3,
       help="Number of slaves to launch (default: 1)")
+  parser.add_option("-g", "--compute-groups", type="int", default=1,
+      help="Computational groups to launch")
   parser.add_option("-w", "--wait", type="int", default=120,
       help="Seconds to wait for nodes to start (default: 120)")
   parser.add_option("-k", "--key-pair",
@@ -84,6 +86,7 @@ def parse_args():
             "maximum price (in dollars)")
   parser.add_option("--delete-groups", action="store_true", default=False,
       help="When destroying a cluster, delete the security groups that were created")
+  parser.add_option("--topo", default="", help="Topology to upload")
             
   (opts, args) = parser.parse_args()
   if len(args) != 2:
@@ -173,7 +176,7 @@ def launch_cluster(conn, opts, cluster_name):
     sys.exit(1)
   
   # CHANGE THIS IF CHANGING REGIONS
-  opts.ami = 'ami-d06204b9'
+  opts.ami = 'ami-90a1c1f9'
   
   print "Launching instances..."
 
@@ -190,18 +193,18 @@ def launch_cluster(conn, opts, cluster_name):
     device.size = opts.ebs_vol_size
     device.delete_on_termination = True
     block_map["/dev/sdv"] = device
-
+  launch_groups = opts.compute_groups + 1
   # Launch compute nodes
   if opts.spot_price != None:
     # Launch spot instances with the requested price
     print ("Requesting %d compute nodes as spot instances with price $%.3f" %
-           (opts.slaves, opts.spot_price))
+           (launch_groups * opts.slaves, opts.spot_price))
     zones = get_zones(conn, opts)
     num_zones = len(zones)
     i = 0
     my_req_ids = []
     for zone in zones:
-      num_slaves_this_zone = get_partition(opts.slaves, num_zones, i)
+      num_slaves_this_zone = get_partition(launch_groups * opts.slaves, num_zones, i)
       compute_reqs = conn.request_spot_instances(
           price = opts.spot_price,
           image_id = opts.ami,
@@ -227,8 +230,8 @@ def launch_cluster(conn, opts, cluster_name):
         for i in my_req_ids:
           if i in id_to_req and id_to_req[i].state == "active":
             active_instance_ids.append(id_to_req[i].instance_id)
-        if len(active_instance_ids) == opts.slaves:
-          print "All %d compute nodes granted" % opts.slaves
+        if len(active_instance_ids) == opts.slaves * launch_groups:
+          print "All %d compute nodes granted" %(opts.slaves * launch_groups)
           reservations = conn.get_all_instances(active_instance_ids)
           compute_nodes = []
           for r in reservations:
@@ -236,7 +239,7 @@ def launch_cluster(conn, opts, cluster_name):
           break
         else:
           print "%d of %d compute nodes granted, waiting longer" % (
-            len(active_instance_ids), opts.slaves)
+            len(active_instance_ids), opts.slaves * launch_groups)
     except:
       print "Canceling spot instance requests"
       conn.cancel_spot_instance_requests(my_req_ids)
@@ -254,7 +257,7 @@ def launch_cluster(conn, opts, cluster_name):
     i = 0
     compute_nodes = []
     for zone in zones:
-      num_slaves_this_zone = get_partition(opts.slaves, num_zones, i)
+      num_slaves_this_zone = get_partition(opts.slaves * launch_groups, num_zones, i)
       if num_slaves_this_zone > 0:
         compute_res = image.run(key_name = opts.key_pair,
                               security_groups = [compute_group],
@@ -335,58 +338,92 @@ def setup_cluster(conn, input_nodes, compute_nodes, opts, deploy_ssh_key):
   print input_nodes
   print compute_nodes[0].public_dns_name
   print len(compute_nodes)
-  ncompute = len(compute_nodes)
-  ssh(master, opts, str.format("""cat >~/input-config.json <<EOF
-{{
-  "PubAddress": "tcp://*:4001",
-  "ControlAddress" : "tcp://*:4000",
-  "Clients": {0},
-  "Shell": true
-}}
-EOF
-""", ncompute))
   ssh(master, opts, str.format("""cat >~/run-smpc <<EOF
 #!/bin/zsh 
 export GOMAXPROCS=4
 $GOPATH/bin/input --config="/home/ubuntu/input-config.json"
 EOF
 """))
-  ssh(master, opts, str.format("""cat >~/test-smpc <<EOF
-#!/bin/zsh 
-export GOMAXPROCS=4
-parallel-ssh -h ~/hosts ~/run-smpc
-$GOPATH/bin/input --config="/home/ubuntu/input-config.json"
-parallel-ssh -h ~/hosts killall compute
-EOF
-"""))
   ssh(master, opts, "chmod 755 ~/run-smpc")
-  ssh(master, opts, "chmod 755 ~/test-smpc")
   print compute_nodes
   print map(lambda c: c.private_ip_address, compute_nodes)
+  ngroups = opts.compute_groups
+  ncompute = opts.slaves
+  print ngroups
+  print ncompute
+  groups = [[compute_nodes[group * ncompute + comp] for comp in xrange(0, opts.slaves)] for group in xrange(0, ngroups + 1)]
+  print groups
+  assert(len(groups) > 1) # make sure there is a redis group
+  redis_group = groups[0]
+  groups = groups[1:]
+  redis_ips = ",".join(map(lambda c: str.format("{{\"Address\":\"{0}:6379\", \"Database\":1}}", c.private_ip_address), redis_group))
+  print groups
+  print str.format("Redis IPs: {0}", redis_ips)
   ssh(master, opts, str.format("""cat >~/hosts <<EOF
 {0}
 EOF
-""", '\n'.join(map(lambda c: c.private_ip_address, compute_nodes))))
-  computes = ",\n".join(map(lambda c: str.format("\"tcp://{0}:5001\"", c.private_ip_address), compute_nodes))
-  for i in xrange(0, len(compute_nodes)):
-      ssh(master, opts, str.format("ssh -o StrictHostKeyChecking=no ubuntu@{0} go get -u github.com/apanda/smpc/...", compute_nodes[i].private_ip_address))
-      ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/compute-config.json <<EOF
+""", '\n'.join(map(lambda c: c.private_ip_address, filter(lambda n: n not in redis_group, compute_nodes)))))
+  ssh(master, opts, str.format("""cat >~/redis-hosts <<EOF
+{0}
+EOF
+""", '\n'.join(map(lambda c: c.private_ip_address, redis_group))))
+  pub_port = 4000
+  group_config = 0
+  for i in xrange(0, len(redis_group)):
+      ssh(master, opts, str.format("""ssh -o StrictHostKeyChecking=no ubuntu@{0} cat >~/launch-redis <<EOF
+sudo redis-server /etc/redis/redis.conf
+EOF
+""", redis_group[i].private_ip_address))
+  for group in groups:
+      compute_nodes = group
+      computes = ",\n".join(map(lambda c: str.format("\"tcp://{0}:5001\"", c.private_ip_address), compute_nodes))
+      ssh(master, opts, str.format("""cat >~/input-config-{3}.json <<EOF
 {{
-  "PubAddress": "tcp://{1}:4001",
-  "ControlAddress" : "tcp://{1}:4000",
-  "Clients" : [
-  {0}
-  ]
+  "PubAddress": "tcp://*:{1}",
+  "ControlAddress" : "tcp://*:{2}",
+  "Clients": {0},
+  "Shell": true
 }}
 EOF
-""", computes, str(master)))
-      ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/run-smpc <<EOF
+    """, ncompute, pub_port, pub_port + 1, group_config))
+      for i in xrange(0, len(compute_nodes)):
+        ssh(master, opts, str.format("ssh -o StrictHostKeyChecking=no ubuntu@{0} go get -u github.com/apanda/smpc/...", compute_nodes[i].private_ip_address))
+        ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/compute-config.json <<EOF
+{{
+  "PubAddress": "tcp://{1}:{2}",
+  "ControlAddress" : "tcp://{1}:{3}",
+  "Clients" : [
+  {0}
+  ],
+  "Databases" : [{4}]
+}}
+EOF
+    """, computes, str(master), pub_port, pub_port + 1, redis_ips))
+        ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/run-smpc <<EOF
 #!/bin/zsh
 export GOMAXPROCS=4
 $GOPATH/bin/compute --config="/home/ubuntu/compute-config.json" --peer={0} > peer{0}.out &
 EOF
 """, i))
-      ssh(compute_nodes[i].public_dns_name, opts, "chmod 755 ~/run-smpc")
+        ssh(compute_nodes[i].public_dns_name, opts, "chmod 755 ~/run-smpc")
+      pub_port += 2
+      group_config += 1
+
+  
+  configs = ' '.join(map(lambda c:"/home/ubuntu/input-config-%d.json"%c, xrange(0, group_config)))
+  ssh(master, opts, str.format("""cat >~/test-smpc <<EOF
+#!/bin/zsh 
+export GOMAXPROCS=4
+parallel-ssh -h ~/redis-hosts sudo ~/launch-redis
+parallel-ssh -h ~/hosts ~/run-smpc
+$GOPATH/bin/input --config="{0}" --topo=\$1 --dest=\$2
+parallel-ssh -h ~/hosts killall compute
+parallel-ssh -h ~/redis-hosts sudo killall redis-server
+EOF
+""", configs))
+  ssh(master, opts, "chmod 755 ~/test-smpc")
+  if opts.topo != "":
+      scp_dir(master, opts, opts.topo, "~/") 
 
 # Wait for a whole cluster (masters, slaves and ZooKeeper) to start up
 def wait_for_cluster(conn, wait_secs, input_nodes, compute_nodes):
@@ -427,6 +464,12 @@ def get_num_disks(instance_type):
 def scp(host, opts, local_file, dest_file):
   subprocess.check_call(
       "scp -q -o StrictHostKeyChecking=no -i %s '%s' '%s@%s:%s'" %
+      (opts.identity_file, local_file, 'ubuntu', host, dest_file), shell=True)
+
+# Copy a file to a given host through scp, throwing an exception if scp fails
+def scp_dir(host, opts, local_file, dest_file):
+  subprocess.check_call(
+      "scp -q -o StrictHostKeyChecking=no -i %s -r '%s' '%s@%s:%s'" %
       (opts.identity_file, local_file, 'ubuntu', host, dest_file), shell=True)
 
 
