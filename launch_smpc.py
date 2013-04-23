@@ -369,10 +369,14 @@ EOF
 """, '\n'.join(map(lambda c: c.private_ip_address, redis_group))))
   pub_port = 4000
   group_config = 0
+  print redis_group, len(redis_group)
   for i in xrange(0, len(redis_group)):
-      ssh(master, opts, str.format("""ssh -o StrictHostKeyChecking=no ubuntu@{0} cat >~/launch-redis <<EOF
+      print "Writing to redis"
+      ssh(redis_group[i].public_dns_name, opts, str.format("""cat >~/launch-redis <<EOF
 sudo redis-server /etc/redis/redis.conf
 EOF
+""", redis_group[i].private_ip_address))
+      ssh(master, opts, str.format("""ssh -o StrictHostKeyChecking=no ubuntu@{0} chmod 755 ~/launch-redis 
 """, redis_group[i].private_ip_address))
   for group in groups:
       compute_nodes = group
@@ -418,7 +422,7 @@ parallel-ssh -h ~/redis-hosts sudo ~/launch-redis
 parallel-ssh -h ~/hosts ~/run-smpc
 $GOPATH/bin/input --config="{0}" --topo=\$1 --dest=\$2
 parallel-ssh -h ~/hosts killall compute
-parallel-ssh -h ~/redis-hosts sudo killall redis-server
+#parallel-ssh -h ~/redis-hosts sudo killall redis-server
 EOF
 """, configs))
   ssh(master, opts, "chmod 755 ~/test-smpc")
