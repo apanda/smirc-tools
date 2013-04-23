@@ -422,7 +422,7 @@ parallel-ssh -h ~/redis-hosts sudo ~/launch-redis
 parallel-ssh -h ~/hosts ~/run-smpc
 $GOPATH/bin/input --config="{0}" --topo=\$1 --dest=\$2
 parallel-ssh -h ~/hosts killall compute
-#parallel-ssh -h ~/redis-hosts sudo killall redis-server
+parallel-ssh -h ~/redis-hosts sudo killall redis-server
 EOF
 """, configs))
   ssh(master, opts, "chmod 755 ~/test-smpc")
