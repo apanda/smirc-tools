@@ -176,7 +176,7 @@ def launch_cluster(conn, opts, cluster_name):
     sys.exit(1)
   
   # CHANGE THIS IF CHANGING REGIONS
-  opts.ami = 'ami-90a1c1f9'
+  opts.ami = 'ami-d76605be'
   
   print "Launching instances..."
 
@@ -406,7 +406,7 @@ EOF
         ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/run-smpc <<EOF
 #!/bin/zsh
 export GOMAXPROCS=4
-$GOPATH/bin/compute --config="/home/ubuntu/compute-config.json" --peer={0} > peer{0}.out &
+$GOPATH/bin/compute --config="/home/ubuntu/compute-config.json" --peer={0} &> peer{0}.out &
 EOF
 """, i))
         ssh(compute_nodes[i].public_dns_name, opts, "chmod 755 ~/run-smpc")
@@ -420,9 +420,11 @@ EOF
 export GOMAXPROCS=4
 parallel-ssh -h ~/redis-hosts sudo ~/launch-redis
 parallel-ssh -h ~/hosts ~/run-smpc
-$GOPATH/bin/input --config="{0}" --topo=\$1 --dest=\$2
-parallel-ssh -h ~/hosts killall compute
-parallel-ssh -h ~/redis-hosts sudo killall redis-server
+$GOPATH/bin/input --config="{0}" --topo=\$1 --dest=\$2 1&>2 | tee smpc.out
+echo Killing compute
+parallel-ssh -h ~/hosts killall compute &> compute.out
+echo Killing redis
+parallel-ssh -h ~/redis-hosts sudo killall redis-server &> redis-server.out
 EOF
 """, configs))
   ssh(master, opts, "chmod 755 ~/test-smpc")
