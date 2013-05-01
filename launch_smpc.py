@@ -340,7 +340,6 @@ def setup_cluster(conn, input_nodes, compute_nodes, opts, deploy_ssh_key):
   print len(compute_nodes)
   ssh(master, opts, str.format("""cat >~/run-smpc <<EOF
 #!/bin/zsh 
-export GOMAXPROCS=4
 $GOPATH/bin/input --config="/home/ubuntu/input-config.json"
 EOF
 """))
@@ -359,6 +358,7 @@ EOF
   redis_ips = ",".join(map(lambda c: str.format("{{\"Address\":\"{0}:6379\", \"Database\":1}}", c.private_ip_address), redis_group))
   print groups
   print str.format("Redis IPs: {0}", redis_ips)
+  print str.format("Private IPs = {0}", map(lambda c: c.private_ip_address, filter(lambda n: n not in redis_group, compute_nodes)))
   ssh(master, opts, str.format("""cat >~/hosts <<EOF
 {0}
 EOF
@@ -405,7 +405,6 @@ EOF
     """, computes, str(master), pub_port, pub_port + 1, redis_ips))
         ssh(compute_nodes[i].public_dns_name, opts, str.format("""cat >~/run-smpc <<EOF
 #!/bin/zsh
-export GOMAXPROCS=4
 $GOPATH/bin/compute --config="/home/ubuntu/compute-config.json" --peer={0} &> peer{0}.out &
 EOF
 """, i))
@@ -417,7 +416,6 @@ EOF
   configs = ' '.join(map(lambda c:"/home/ubuntu/input-config-%d.json"%c, xrange(0, group_config)))
   ssh(master, opts, str.format("""cat >~/test-smpc <<EOF
 #!/bin/zsh 
-export GOMAXPROCS=4
 parallel-ssh -h ~/redis-hosts sudo ~/launch-redis
 parallel-ssh -h ~/hosts ~/run-smpc
 $GOPATH/bin/input --config="{0}" --topo=\$1 --dest=\$2 1&>2 | tee smpc.out
